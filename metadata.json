@@ -1,0 +1,5 @@
+{
+  "name": "Potato Clock",
+  "description": "A feature-rich Pomodoro timer with micro-breaks, task management, and work statistics.",
+  "requestFramePermissions": []
+}
