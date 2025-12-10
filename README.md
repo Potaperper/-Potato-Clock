@@ -3,7 +3,7 @@
 
 **土豆钟** 是一款基于番茄工作法的高级桌面时间管理工具，融合了任务管理、健康微休息和数据统计功能。它采用现代化的扁平设计风格，支持 Windows 平台。
 
-![App Screenshot Placeholder](https://via.placeholder.com/800x500?text=Potato+Clock+Screenshot)
+
 
 ## ✨ 核心特色
 
