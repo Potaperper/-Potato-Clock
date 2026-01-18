@@ -1,5 +1,5 @@
 
-const { app, BrowserWindow } = require('electron')
+const { app, BrowserWindow, ipcMain, dialog } = require('electron')
 const path = require('path')
 
 function createWindow () {
@@ -24,6 +24,21 @@ function createWindow () {
   // --- 生产环境关闭开发者工具 ---
   // win.webContents.openDevTools()
 }
+
+// IPC Listener for File Dialog
+ipcMain.handle('open-file-dialog', async (event) => {
+  const result = await dialog.showOpenDialog({
+    properties: ['openFile'],
+    filters: [
+      { name: 'Audio', extensions: ['mp3'] }
+    ]
+  });
+  
+  if (result.canceled || result.filePaths.length === 0) {
+    return null;
+  }
+  return result.filePaths[0];
+});
 
 app.whenReady().then(createWindow)
 

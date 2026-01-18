@@ -1,5 +1,4 @@
-
-import React, { useState } from 'react';
+import React from 'react';
 import { Settings, DEFAULT_SETTINGS, SoundType } from '../types';
 import { X, RotateCcw, Save, Upload, Music, Trash2, Folder, Moon, Sun, Volume2, Monitor } from 'lucide-react';
 
@@ -8,8 +7,7 @@ interface SettingsModalProps {
   onClose: () => void;
   settings: Settings;
   onSave: (newSettings: Settings) => void;
-  customSounds: Record<SoundType, File | null | string>; 
-  onCustomSoundChange: (type: SoundType, file: File | null) => void;
+  onPickFile: () => Promise<string | null>;
 }
 
 const SettingsModal: React.FC<SettingsModalProps> = ({ 
@@ -17,15 +15,13 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
   onClose, 
   settings, 
   onSave,
-  onCustomSoundChange
+  onPickFile
 }) => {
   const [localSettings, setLocalSettings] = React.useState<Settings>(settings);
-  const [tempFileNames, setTempFileNames] = useState<Record<string, string>>({});
 
   React.useEffect(() => {
     if (isOpen) {
         setLocalSettings(settings);
-        setTempFileNames({});
     }
   }, [isOpen, settings]);
 
@@ -44,22 +40,17 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
 
   const SoundUploader = ({ 
     type, 
-    label, 
-    accept = "audio/mp3" 
+    label
   }: { 
     type: SoundType, 
-    label: string, 
-    accept?: string 
+    label: string
   }) => {
     const savedPath = localSettings.soundPaths[type];
     
     let displayName = '默认提示音';
     let isSet = false;
 
-    if (tempFileNames[type]) {
-        displayName = tempFileNames[type];
-        isSet = true;
-    } else if (savedPath) {
+    if (savedPath) {
         const parts = savedPath.split(/[/\\]/);
         displayName = parts.length > 0 ? parts[parts.length - 1] : savedPath;
         try { displayName = decodeURIComponent(displayName); } catch(e) {}
@@ -70,7 +61,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
       <div className={`flex items-center justify-between p-3 rounded-lg border ${isDark ? 'bg-gray-700 border-gray-600' : 'bg-gray-50 border-gray-200'}`}>
         <div className="flex items-center gap-3 overflow-hidden">
           <div className={`p-2 rounded-lg ${isSet ? (isDark ? 'bg-indigo-900 text-indigo-300' : 'bg-indigo-100 text-indigo-600') : (isDark ? 'bg-gray-600 text-gray-400' : 'bg-gray-100 text-gray-400')}`}>
-            {savedPath || tempFileNames[type] ? <Folder size={18} /> : <Music size={18} />}
+            {savedPath ? <Folder size={18} /> : <Music size={18} />}
           </div>
           <div className="flex-1 min-w-0">
             <p className={`text-sm font-medium ${isDark ? 'text-gray-200' : 'text-gray-700'}`}>{label}</p>
@@ -80,35 +71,27 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <input
-            type="file"
-            id={`file-${type}`}
-            accept={accept}
-            className="hidden"
-            onChange={(e) => {
-              if (e.target.files?.[0]) {
-                const file = e.target.files[0];
-                onCustomSoundChange(type, file);
-                setTempFileNames(prev => ({ ...prev, [type]: file.name }));
-              }
+          <button 
+            onClick={async () => {
+                const path = await onPickFile();
+                if (path) {
+                    setLocalSettings(prev => ({
+                        ...prev,
+                        soundPaths: {
+                            ...prev.soundPaths,
+                            [type]: path
+                        }
+                    }));
+                }
             }}
-          />
-          <label 
-            htmlFor={`file-${type}`}
             className={`p-2 rounded-lg cursor-pointer transition ${isDark ? 'text-gray-400 hover:text-indigo-400 hover:bg-gray-600' : 'text-gray-500 hover:text-indigo-600 hover:bg-indigo-50'}`}
-            title={savedPath ? "更新本地文件" : "上传文件"}
+            title="选择文件"
           >
             <Upload size={18} />
-          </label>
+          </button>
           {isSet && (
             <button
               onClick={() => {
-                 onCustomSoundChange(type, null);
-                 setTempFileNames(prev => {
-                    const next = { ...prev };
-                    delete next[type];
-                    return next;
-                 });
                  setLocalSettings(prev => ({
                     ...prev,
                     soundPaths: { ...prev.soundPaths, [type]: null }
@@ -288,10 +271,10 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
             <section>
                 <h3 className="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-4 border-b pb-2">自定义提示音 (Local/Electron)</h3>
                 <div className="space-y-3">
-                    <SoundUploader type="workEnd" label="工作结束提示音" accept=".mp3" />
-                    <SoundUploader type="breakEnd" label="休息结束提示音" accept=".mp3" />
-                    <SoundUploader type="breakBg" label="休息背景音乐" accept=".mp3" />
-                    <SoundUploader type="microBreakBg" label="微休息背景" accept=".mp3" />
+                    <SoundUploader type="workEnd" label="工作结束提示音" />
+                    <SoundUploader type="breakEnd" label="休息结束提示音" />
+                    <SoundUploader type="breakBg" label="休息背景音乐" />
+                    <SoundUploader type="microBreakBg" label="微休息背景" />
                     <p className="text-xs text-gray-400 mt-2 italic">* 打包为 Electron 应用后，选择的文件路径会被自动保存。仅支持 MP3。</p>
                 </div>
             </section>

@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Settings as SettingsType, Task, DailyLog, TimerMode, DEFAULT_SETTINGS, SoundType, Column } from './types';
 import TimerDisplay from './components/TimerDisplay';
@@ -131,28 +130,40 @@ const App: React.FC = () => {
 
   // --- Initialize Sounds from Settings (Electron Persistence) ---
   useEffect(() => {
-    // 1. Restore MP3 paths on load
     if (settings.soundPaths) {
       const newUrls = { ...fileUrls };
       let changed = false;
       (Object.keys(settings.soundPaths) as SoundType[]).forEach(type => {
         const savedPath = settings.soundPaths[type];
-        if (savedPath) {
-          newUrls[type] = getFileUrl(savedPath); 
-          changed = true;
+        // Only update if path changed or url is missing
+        // For blobs (from previous session?), we can't easily check.
+        // But since we rely on file:// paths now, we can regenerate.
+        const currentUrl = fileUrls[type];
+        const newUrl = getFileUrl(savedPath);
+        
+        if (newUrl !== currentUrl) {
+            newUrls[type] = newUrl;
+            changed = true;
         }
       });
       if (changed) {
         setFileUrls(newUrls);
       }
     }
+  }, [settings.soundPaths]);
 
-    // 2. Auto-clean old tasks on startup
-    cleanupOldTasks();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
-  // --- Task Cleanup Logic ---
+  // --- Handle File Selection (IPC) ---
+  const handlePickFile = async (): Promise<string | null> => {
+      try {
+          const electron = (window as any).require('electron');
+          return await electron.ipcRenderer.invoke('open-file-dialog');
+      } catch (e) {
+          console.error("Electron IPC failed", e);
+          return null;
+      }
+  };
+
   const cleanupOldTasks = () => {
     setTasks(prev => {
       const today = new Date();
@@ -167,35 +178,10 @@ const App: React.FC = () => {
     });
   };
 
-  // --- Handle File Selection ---
-  const handleCustomFileChange = (type: SoundType, file: File | null) => {
-    if (file) {
-      const blobUrl = URL.createObjectURL(file);
-      setFileUrls(prev => ({ ...prev, [type]: blobUrl }));
-      const filePath = (file as any).path;
-      if (filePath) {
-        setSettings(prev => ({
-          ...prev,
-          soundPaths: {
-            ...(prev.soundPaths || DEFAULT_SETTINGS.soundPaths),
-            [type]: filePath
-          }
-        }));
-      }
-    } else {
-      if (fileUrls[type] && fileUrls[type]!.startsWith('blob:')) {
-        URL.revokeObjectURL(fileUrls[type]!);
-      }
-      setFileUrls(prev => ({ ...prev, [type]: null }));
-      setSettings(prev => ({
-        ...prev,
-        soundPaths: {
-          ...(prev.soundPaths || DEFAULT_SETTINGS.soundPaths),
-          [type]: null
-        }
-      }));
-    }
-  };
+  // --- Auto-clean old tasks on startup ---
+  useEffect(() => {
+    cleanupOldTasks();
+  }, []);
 
   // --- Audio Logic Helper ---
   const getVolumeForType = useCallback((type: SoundType) => {
@@ -287,6 +273,18 @@ const App: React.FC = () => {
     microBreakRemainingRef.current = randomSeconds * 1000;
     nextMicroBreakTimeRef.current = Date.now() + microBreakRemainingRef.current;
   }, [settings]);
+
+  // --- Micro-break Scheduler Watcher ---
+  // Moved this BELOW scheduleNextMicroBreak definition to fix TS ReferenceError
+  useEffect(() => {
+    if (mode === TimerMode.WORK && isActive && settings.enableMicroBreaks) {
+         // Reschedule if settings change (function ref changes)
+         scheduleNextMicroBreak();
+    } else if (!settings.enableMicroBreaks) {
+        nextMicroBreakTimeRef.current = null;
+        microBreakRemainingRef.current = null;
+    }
+  }, [mode, isActive, settings.enableMicroBreaks, scheduleNextMicroBreak]);
 
   const switchMode = useCallback((newMode: TimerMode, manualTrigger: boolean = false) => {
     stopBackgroundMusic();
@@ -729,8 +727,7 @@ const App: React.FC = () => {
                  setIsActive(false);
             }
         }}
-        customSounds={fileUrls as any} 
-        onCustomSoundChange={handleCustomFileChange}
+        onPickFile={handlePickFile}
       />
     </div>
   );
