@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Settings as SettingsType, Task, DailyLog, TimerMode, DEFAULT_SETTINGS, SoundType, Column } from './types';
+import { Settings as SettingsType, Task, DailyLog, TimerMode, DEFAULT_SETTINGS, SoundType, Column, DailySnapshot } from './types';
 import TimerDisplay from './components/TimerDisplay';
 import TaskList from './components/TaskList';
 import Stats from './components/Stats';
 import SettingsModal from './components/SettingsModal';
 import { playSound, stopSound } from './utils/sound';
-import { Settings, Play, Pause, RotateCcw, BarChart2, CheckCircle2, Plus, X, Eraser } from 'lucide-react';
+import { generateDayMarkdown, getMonthFilename, updateMonthlyMarkdown, parseMarkdownToSnapshots } from './utils/markdown';
+import { Settings, Play, Pause, RotateCcw, BarChart2, CheckCircle2, Plus, X, Check } from 'lucide-react';
 import { format, isSameDay } from 'date-fns';
 
 const App: React.FC = () => {
@@ -20,10 +21,12 @@ const App: React.FC = () => {
           ...parsed,
           soundPaths: parsed.soundPaths || DEFAULT_SETTINGS.soundPaths,
           darkMode: parsed.darkMode ?? false,
-          uiScale: parsed.uiScale ?? 0.75, // Default to 0.75 if not set
+          uiScale: parsed.uiScale ?? 0.75,
           volumeNotification: parsed.volumeNotification ?? parsed.volume ?? 70,
           volumeBreak: parsed.volumeBreak ?? parsed.volume ?? 50,
           volumeMicroBreak: parsed.volumeMicroBreak ?? parsed.volume ?? 40,
+          markdownExportPath: parsed.markdownExportPath ?? null,
+          enableMarkdownExport: parsed.enableMarkdownExport ?? false,
         };
       }
     } catch (e) {
@@ -55,7 +58,6 @@ const App: React.FC = () => {
     try {
       const saved = localStorage.getItem('potato_tasks');
       let loadedTasks = saved ? JSON.parse(saved) : [];
-      // Migration: Ensure tasks have columnId
       if (loadedTasks.length > 0 && !loadedTasks[0].columnId) {
         loadedTasks = loadedTasks.map((t: any) => ({
              ...t, 
@@ -78,7 +80,17 @@ const App: React.FC = () => {
     }
   });
 
-  // --- State: Custom Sounds (Session Only + Path Logic) ---
+  // --- State: Historical Snapshots (from imported markdown) ---
+  const [historicalSnapshots, setHistoricalSnapshots] = useState<DailySnapshot[]>(() => {
+    try {
+      const saved = localStorage.getItem('potato_snapshots');
+      return saved ? JSON.parse(saved) : [];
+    } catch (e) {
+      return [];
+    }
+  });
+
+  // --- State: Custom Sounds ---
   const [fileUrls, setFileUrls] = useState<Record<SoundType, string | null>>({
     workEnd: null,
     breakEnd: null,
@@ -95,20 +107,19 @@ const App: React.FC = () => {
   // --- State: UI ---
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<'tasks' | 'stats'>('tasks');
-
-  // --- State: Add Column UI ---
   const [isAddingColumn, setIsAddingColumn] = useState(false);
   const [newColumnTitle, setNewColumnTitle] = useState('');
+  const [showToast, setShowToast] = useState(false);
+  const [toastMessage, setToastMessage] = useState('');
+
+  // --- State: Last known date for day change detection ---
+  const [lastKnownDate, setLastKnownDate] = useState<string>(() => format(new Date(), 'yyyy-MM-dd'));
 
   // --- Refs ---
   const timerRef = useRef<number | null>(null);
   const nextMicroBreakTimeRef = useRef<number | null>(null);
-  const microBreakRemainingRef = useRef<number | null>(null); // To store remaining time when paused
-  
-  // New: Snapshot to resume work time after micro-break
+  const microBreakRemainingRef = useRef<number | null>(null);
   const workTimeSnapshotRef = useRef<number | null>(null);
-  
-  // Media Refs
   const audioRef = useRef<HTMLAudioElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const bgAudioRef = useRef<HTMLAudioElement>(null);
@@ -118,8 +129,9 @@ const App: React.FC = () => {
   useEffect(() => { localStorage.setItem('potato_tasks', JSON.stringify(tasks)); }, [tasks]);
   useEffect(() => { localStorage.setItem('potato_logs', JSON.stringify(logs)); }, [logs]);
   useEffect(() => { localStorage.setItem('potato_columns', JSON.stringify(columns)); }, [columns]);
+  useEffect(() => { localStorage.setItem('potato_snapshots', JSON.stringify(historicalSnapshots)); }, [historicalSnapshots]);
 
-  // --- Helper: Convert Path to URL (Electron Fix) ---
+  // --- Helper: Convert Path to URL ---
   const getFileUrl = (path: string | null) => {
     if (!path) return null;
     if (path.startsWith('blob:') || path.startsWith('http')) return path;
@@ -128,16 +140,169 @@ const App: React.FC = () => {
     return `file:///${encodedPath}`;
   };
 
-  // --- Initialize Sounds from Settings (Electron Persistence) ---
+  // --- Helper: IPC calls ---
+  const ipcInvoke = async (channel: string, ...args: any[]): Promise<any> => {
+    try {
+      const electron = (window as any).require('electron');
+      return await electron.ipcRenderer.invoke(channel, ...args);
+    } catch (e) {
+      console.error(`IPC ${channel} failed`, e);
+      return null;
+    }
+  };
+
+  const handlePickFile = async (): Promise<string | null> => ipcInvoke('open-file-dialog');
+  const handlePickFolder = async (): Promise<string | null> => ipcInvoke('open-folder-dialog');
+
+  // --- Markdown Export Logic ---
+  const exportTodayToMarkdown = useCallback(async () => {
+    if (!settings.enableMarkdownExport || !settings.markdownExportPath) return;
+
+    const today = format(new Date(), 'yyyy-MM-dd');
+    const todayLog = logs.find(l => l.date === today);
+    const focusMinutes = todayLog ? Math.round(todayLog.secondsWorked / 60) : 0;
+
+    // Generate today's markdown content
+    const dayContent = generateDayMarkdown(today, tasks, columns, focusMinutes);
+
+    // Build file path
+    const filename = getMonthFilename(new Date());
+    const filePath = `${settings.markdownExportPath}/${filename}`.replace(/\\/g, '/');
+
+    // Read existing content
+    const existsResult = await ipcInvoke('file-exists', filePath);
+    let existingContent = '';
+    
+    if (existsResult) {
+      const readResult = await ipcInvoke('read-file', filePath);
+      if (readResult?.success) {
+        existingContent = readResult.content;
+      }
+    }
+
+    // If file is empty or doesn't exist, create header
+    if (!existingContent) {
+      const yearMonth = format(new Date(), 'yyyy-MM');
+      existingContent = `# ${yearMonth} 任务记录\n\n`;
+    }
+
+    // Update or append today's content
+    const updatedContent = updateMonthlyMarkdown(existingContent, today, dayContent);
+
+    // Write back
+    const writeResult = await ipcInvoke('write-file', filePath, updatedContent);
+    if (writeResult?.success) {
+      console.log('Markdown exported successfully to', filePath);
+    } else {
+      console.error('Failed to export markdown:', writeResult?.error);
+    }
+  }, [settings.enableMarkdownExport, settings.markdownExportPath, tasks, columns, logs]);
+
+  // --- Day Change Detection ---
+  useEffect(() => {
+    const checkDayChange = () => {
+      const today = format(new Date(), 'yyyy-MM-dd');
+      if (today !== lastKnownDate) {
+        console.log('Day changed from', lastKnownDate, 'to', today);
+        // Export yesterday's data before switching
+        exportTodayToMarkdown();
+        setLastKnownDate(today);
+      }
+    };
+
+    // Check every minute
+    const interval = setInterval(checkDayChange, 60000);
+    // Also check on mount
+    checkDayChange();
+
+    return () => clearInterval(interval);
+  }, [lastKnownDate, exportTodayToMarkdown]);
+
+  // --- Export on tasks/logs change (debounced) ---
+  useEffect(() => {
+    if (!settings.enableMarkdownExport || !settings.markdownExportPath) return;
+    
+    const timeout = setTimeout(() => {
+      exportTodayToMarkdown();
+    }, 5000); // Debounce 5 seconds
+
+    return () => clearTimeout(timeout);
+  }, [tasks, logs, settings.enableMarkdownExport, settings.markdownExportPath]);
+
+  // --- Import Markdown Handler ---
+  const handleImportMarkdown = async () => {
+    const filePath = await ipcInvoke('open-markdown-dialog');
+    if (!filePath) return;
+
+    const readResult = await ipcInvoke('read-file', filePath);
+    if (!readResult?.success) {
+      console.error('Failed to read file:', readResult?.error);
+      return;
+    }
+
+    const snapshots = parseMarkdownToSnapshots(readResult.content);
+    if (snapshots.length > 0) {
+      setHistoricalSnapshots(prev => {
+        // Merge, avoiding duplicates by date
+        const existingDates = new Set(prev.map(s => s.date));
+        const newSnapshots = snapshots.filter(s => !existingDates.has(s.date));
+        return [...prev, ...newSnapshots];
+      });
+
+      // Also update logs with focus time from imported data
+      setLogs(prev => {
+        const existingDates = new Set(prev.map(l => l.date));
+        const newLogs = snapshots
+          .filter(s => !existingDates.has(s.date) && s.focusMinutes > 0)
+          .map(s => ({
+            date: s.date,
+            secondsWorked: s.focusMinutes * 60,
+            tasksCompleted: s.tasks.filter(t => t.completed).length
+          }));
+        return [...prev, ...newLogs];
+      });
+
+      // Import tasks as current tasks with createdAt set to their date
+      const todayStr = format(new Date(), 'yyyy-MM-dd');
+      setTasks(prev => {
+        const existingTaskTexts = new Set(prev.map(t => t.text.toLowerCase()));
+        const newTasks: Task[] = [];
+        
+        for (const snapshot of snapshots) {
+          // Only import today's incomplete tasks as active tasks
+          if (snapshot.date === todayStr) {
+            for (const task of snapshot.tasks) {
+              if (!existingTaskTexts.has(task.text.toLowerCase())) {
+                const dateTimestamp = new Date(snapshot.date).getTime();
+                newTasks.push({
+                  id: `imported-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+                  text: task.text,
+                  completed: task.completed,
+                  createdAt: dateTimestamp,
+                  completedAt: task.completed ? dateTimestamp : undefined,
+                  columnId: task.completed ? 'done' : 'todo'
+                });
+                existingTaskTexts.add(task.text.toLowerCase());
+              }
+            }
+          }
+        }
+        
+        return [...prev, ...newTasks];
+      });
+
+      console.log(`Imported ${snapshots.length} daily snapshots`);
+      showToastMessage(`已导入 ${snapshots.length} 天的记录`);
+    }
+  };
+
+  // --- Initialize Sounds from Settings ---
   useEffect(() => {
     if (settings.soundPaths) {
       const newUrls = { ...fileUrls };
       let changed = false;
       (Object.keys(settings.soundPaths) as SoundType[]).forEach(type => {
         const savedPath = settings.soundPaths[type];
-        // Only update if path changed or url is missing
-        // For blobs (from previous session?), we can't easily check.
-        // But since we rely on file:// paths now, we can regenerate.
         const currentUrl = fileUrls[type];
         const newUrl = getFileUrl(savedPath);
         
@@ -152,30 +317,29 @@ const App: React.FC = () => {
     }
   }, [settings.soundPaths]);
 
-
-  // --- Handle File Selection (IPC) ---
-  const handlePickFile = async (): Promise<string | null> => {
-      try {
-          const electron = (window as any).require('electron');
-          return await electron.ipcRenderer.invoke('open-file-dialog');
-      } catch (e) {
-          console.error("Electron IPC failed", e);
-          return null;
-      }
+  // --- Toast Helper ---
+  const showToastMessage = (message: string) => {
+    setToastMessage(message);
+    setShowToast(true);
+    setTimeout(() => setShowToast(false), 2000);
   };
 
   const cleanupOldTasks = () => {
     setTasks(prev => {
       const today = new Date();
       return prev.filter(t => {
-        // Keep incomplete tasks
         if (!t.completed) return true;
-        // Keep tasks completed TODAY
         if (t.completed && t.completedAt && isSameDay(t.completedAt, today)) return true;
-        // Delete tasks completed BEFORE today
         return false;
       });
     });
+  };
+
+  // --- Refresh Handler (cleanup + sync + toast) ---
+  const handleRefresh = async () => {
+    cleanupOldTasks();
+    await exportTodayToMarkdown();
+    showToastMessage('已刷新');
   };
 
   // --- Auto-clean old tasks on startup ---
@@ -190,7 +354,6 @@ const App: React.FC = () => {
       return settings.volumeNotification;
   }, [settings]);
 
-  // --- Audio Logic ---
   const playCustomOrSystem = useCallback((type: SoundType, systemFallback: 'tick' | 'alarm' | 'start' | 'relax') => {
     const vol = getVolumeForType(type);
     const url = fileUrls[type];
@@ -214,7 +377,6 @@ const App: React.FC = () => {
     const vol = getVolumeForType(type);
     const url = fileUrls[type];
     
-    // Video Microbreak
     if (type === 'microBreakBg' && url && videoElement) {
        videoElement.src = url;
        videoElement.volume = vol / 100;
@@ -223,7 +385,6 @@ const App: React.FC = () => {
        return;
     }
 
-    // Audio Background
     if (url && bgAudioRef.current) {
       bgAudioRef.current.src = url;
       bgAudioRef.current.volume = vol / 100;
@@ -235,12 +396,8 @@ const App: React.FC = () => {
   }, [fileUrls, getVolumeForType]);
 
   const stopBackgroundMusic = useCallback(() => {
-    if (bgAudioRef.current) {
-      bgAudioRef.current.pause();
-    }
-    if (videoRef.current) {
-      videoRef.current.pause();
-    }
+    if (bgAudioRef.current) bgAudioRef.current.pause();
+    if (videoRef.current) videoRef.current.pause();
     stopSound(); 
   }, []);
 
@@ -262,23 +419,15 @@ const App: React.FC = () => {
     }
     const min = settings.microBreakMinInterval * 60;
     const max = settings.microBreakMaxInterval * 60;
-    // Ensure logical bounds
     const safeMin = Math.min(min, max);
     const safeMax = Math.max(min, max);
-    
-    // Calculate random duration in seconds
     const randomSeconds = Math.floor(Math.random() * (safeMax - safeMin + 1)) + safeMin;
-    
-    // Store as remaining milliseconds for better pause/resume handling
     microBreakRemainingRef.current = randomSeconds * 1000;
     nextMicroBreakTimeRef.current = Date.now() + microBreakRemainingRef.current;
   }, [settings]);
 
-  // --- Micro-break Scheduler Watcher ---
-  // Moved this BELOW scheduleNextMicroBreak definition to fix TS ReferenceError
   useEffect(() => {
     if (mode === TimerMode.WORK && isActive && settings.enableMicroBreaks) {
-         // Reschedule if settings change (function ref changes)
          scheduleNextMicroBreak();
     } else if (!settings.enableMicroBreaks) {
         nextMicroBreakTimeRef.current = null;
@@ -289,17 +438,14 @@ const App: React.FC = () => {
   const switchMode = useCallback((newMode: TimerMode, manualTrigger: boolean = false) => {
     stopBackgroundMusic();
     
-    // Snapshot Work Time before leaving WORK for MICRO_BREAK
     if (mode === TimerMode.WORK && newMode === TimerMode.MICRO_BREAK) {
         workTimeSnapshotRef.current = timeRemaining;
     }
 
-    // Auto-Resume logic for Micro-Break
     const returningFromMicroBreak = (mode === TimerMode.MICRO_BREAK && newMode === TimerMode.WORK);
 
     setMode(newMode);
     
-    // Restore Work Time if returning from MICRO_BREAK
     if (returningFromMicroBreak && workTimeSnapshotRef.current !== null) {
         setTimeRemaining(workTimeSnapshotRef.current);
         workTimeSnapshotRef.current = null; 
@@ -309,22 +455,17 @@ const App: React.FC = () => {
     
     if (newMode === TimerMode.WORK) {
       scheduleNextMicroBreak();
-      
-      // Auto-start rules for WORK
       if (returningFromMicroBreak) {
-        // ALWAYS auto-resume after micro-break
         setIsActive(true);
       } else {
         if (settings.autoStartWork && !manualTrigger) setIsActive(true);
         else setIsActive(false);
       }
-
     } else if (newMode === TimerMode.SHORT_BREAK) {
       if (settings.autoStartBreak && !manualTrigger) {
         setIsActive(true);
         startBackgroundMusic('breakBg');
       } else {
-        // Manual break click -> pause
         setIsActive(false);
       }
     } else if (newMode === TimerMode.MICRO_BREAK) {
@@ -333,7 +474,6 @@ const App: React.FC = () => {
     }
   }, [getDurationForMode, scheduleNextMicroBreak, settings, startBackgroundMusic, stopBackgroundMusic, mode, timeRemaining]);
 
-  // Effect to handle MicroBreak Video/Audio start
   useEffect(() => {
     if (showMicroBreakOverlay && mode === TimerMode.MICRO_BREAK) {
       const timer = setTimeout(() => {
@@ -347,7 +487,6 @@ const App: React.FC = () => {
     }
   }, [showMicroBreakOverlay, mode, startBackgroundMusic]);
   
-  // Audio Resume Logic
   useEffect(() => {
     if (isActive && mode === TimerMode.SHORT_BREAK) {
        startBackgroundMusic('breakBg');
@@ -376,7 +515,6 @@ const App: React.FC = () => {
       timerRef.current = window.setInterval(() => {
         setTimeRemaining(prev => prev - 1);
 
-        // Check for MicroBreak trigger
         if (mode === TimerMode.WORK && settings.enableMicroBreaks && nextMicroBreakTimeRef.current) {
           if (Date.now() >= nextMicroBreakTimeRef.current) {
             nextMicroBreakTimeRef.current = null;
@@ -414,23 +552,17 @@ const App: React.FC = () => {
   // --- Handlers ---
   const toggleTimer = () => {
     if (!isActive) {
-        // RESUMING
         playSound('tick', settings.volumeNotification);
-        
-        // Restore Microbreak timer
         if (mode === TimerMode.WORK && microBreakRemainingRef.current) {
              nextMicroBreakTimeRef.current = Date.now() + microBreakRemainingRef.current;
         } else if (mode === TimerMode.WORK && !nextMicroBreakTimeRef.current) {
-             // If for some reason it wasn't scheduled (shouldn't happen often)
              scheduleNextMicroBreak();
         }
     } else {
-        // PAUSING
-        // Save remaining time for microbreak
         if (mode === TimerMode.WORK && nextMicroBreakTimeRef.current) {
             const remaining = Math.max(0, nextMicroBreakTimeRef.current - Date.now());
             microBreakRemainingRef.current = remaining;
-            nextMicroBreakTimeRef.current = null; // Stop the target
+            nextMicroBreakTimeRef.current = null;
         }
     }
     setIsActive(!isActive);
@@ -487,7 +619,6 @@ const App: React.FC = () => {
       setTasks(newTasks);
   };
 
-  // App.tsx controls adding column now
   const handleAddColumn = () => {
       if (newColumnTitle.trim()) {
           setColumns(prev => [...prev, { id: Date.now().toString(), title: newColumnTitle }]);
@@ -522,6 +653,18 @@ const App: React.FC = () => {
       <audio ref={audioRef} className="hidden" />
       <audio ref={bgAudioRef} className="hidden" />
 
+      {/* Toast Notification */}
+      {showToast && (
+        <div className="fixed top-6 left-1/2 -translate-x-1/2 z-[100] animate-fade-in">
+          <div className={`flex items-center gap-2 px-4 py-2 rounded-full shadow-lg ${
+            settings.darkMode ? 'bg-gray-700 text-white' : 'bg-gray-800 text-white'
+          }`}>
+            <Check size={16} className="text-emerald-400" />
+            <span className="text-sm font-medium">{toastMessage}</span>
+          </div>
+        </div>
+      )}
+
       {/* Micro Break Overlay */}
       {showMicroBreakOverlay && mode === TimerMode.MICRO_BREAK && (
         <div className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-indigo-900 text-white overflow-hidden animate-fade-in">
@@ -544,13 +687,12 @@ const App: React.FC = () => {
         </div>
       )}
 
-      {/* Main Container - Responsive Height */}
+      {/* Main Container */}
       <div className="w-full max-w-5xl h-[calc(100vh-2rem)] min-h-[600px] grid grid-cols-1 md:grid-cols-12 gap-6 z-10 items-stretch">
         
         {/* Left Panel: Timer */}
         <div className="md:col-span-5 flex flex-col gap-6 h-full">
           <div className={`rounded-3xl shadow-xl p-8 flex flex-col items-center justify-between h-full border relative overflow-hidden ${settings.darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-100'}`}>
-            {/* Top Bar */}
             <div className="w-full flex justify-between items-center mb-4 z-10">
               <div className="flex gap-2">
                 <div className={`w-3 h-3 rounded-full transition-colors ${mode === TimerMode.WORK ? 'bg-red-500 scale-125' : 'bg-gray-300'}`} />
@@ -561,7 +703,6 @@ const App: React.FC = () => {
               </button>
             </div>
 
-            {/* Timer Visual */}
             <div className="z-10 py-6">
               <TimerDisplay 
                 timeRemaining={timeRemaining} 
@@ -573,7 +714,6 @@ const App: React.FC = () => {
               />
             </div>
 
-            {/* Controls */}
             <div className="flex items-center gap-4 w-full z-10 mb-8">
               <button 
                 onClick={resetTimer}
@@ -592,7 +732,6 @@ const App: React.FC = () => {
               </button>
             </div>
 
-            {/* Background Blob Decoration */}
             <div 
               className="absolute -top-20 -right-20 w-64 h-64 rounded-full opacity-5 blur-3xl transition-colors duration-700"
               style={{ backgroundColor: currentThemeColor }}
@@ -608,7 +747,6 @@ const App: React.FC = () => {
         <div className="md:col-span-7 flex flex-col h-full">
             <div className={`rounded-3xl shadow-xl h-full border relative overflow-hidden flex flex-col ${settings.darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-100'}`}>
                 
-                {/* Right Panel Header */}
                 <div className={`px-6 py-4 border-b flex items-center justify-between ${settings.darkMode ? 'border-gray-700' : 'border-gray-100'}`}>
                     <div className="flex gap-4">
                     <button 
@@ -635,19 +773,18 @@ const App: React.FC = () => {
                     </button>
                     </div>
 
-                    {/* Actions */}
                     {activeTab === 'tasks' && (
                       <div className="flex gap-2">
                         <button 
-                            onClick={cleanupOldTasks}
+                            onClick={handleRefresh}
                             className={`p-2 rounded-full transition shadow-sm ${
                                 settings.darkMode 
                                 ? 'bg-gray-700 text-gray-300 hover:bg-gray-600 hover:text-white' 
                                 : 'bg-gray-100 text-gray-500 hover:bg-gray-200 hover:text-gray-900'
                             }`}
-                            title="刷新：清理今天之前已完成的任务"
+                            title="刷新：清理今天之前已完成的任务并同步文件"
                         >
-                            <Eraser size={18} />
+                            <RotateCcw size={18} />
                         </button>
                         <button 
                             onClick={() => setIsAddingColumn(true)}
@@ -664,9 +801,7 @@ const App: React.FC = () => {
                     )}
                 </div>
 
-                {/* Right Panel Content */}
                 <div className="flex-1 relative overflow-hidden flex flex-col">
-                    {/* Add Column Inline Input */}
                     {isAddingColumn && activeTab === 'tasks' && (
                         <div className={`m-4 p-2 rounded-lg border flex gap-2 animate-fade-in ${settings.darkMode ? 'bg-gray-900 border-gray-600' : 'bg-gray-50 border-gray-200'}`}>
                             <input 
@@ -695,13 +830,13 @@ const App: React.FC = () => {
                             onToggleTask={toggleTask}
                             onDeleteTask={deleteTask}
                             onReorderTasks={reorderTasks}
-                            onAddColumn={() => {}} // Controlled by App.tsx now
+                            onAddColumn={() => {}}
                             onUpdateColumn={updateColumn}
                             onDeleteColumn={deleteColumn}
                             darkMode={settings.darkMode}
                         />
                         ) : (
-                        <Stats logs={logs} tasks={tasks} darkMode={settings.darkMode} />
+                        <Stats logs={logs} tasks={tasks} historicalSnapshots={historicalSnapshots} darkMode={settings.darkMode} />
                         )}
                     </div>
                 </div>
@@ -718,7 +853,6 @@ const App: React.FC = () => {
             const oldBreak = settings.breakDuration;
             setSettings(newSettings);
 
-            // Bug fix: Reset timer if duration changed for current mode
             if (mode === TimerMode.WORK && oldWork !== newSettings.workDuration) {
                  setTimeRemaining(newSettings.workDuration * 60);
                  setIsActive(false);
@@ -728,6 +862,8 @@ const App: React.FC = () => {
             }
         }}
         onPickFile={handlePickFile}
+        onPickFolder={handlePickFolder}
+        onImportMarkdown={handleImportMarkdown}
       />
     </div>
   );

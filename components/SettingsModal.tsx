@@ -1,6 +1,6 @@
 import React from 'react';
 import { Settings, DEFAULT_SETTINGS, SoundType } from '../types';
-import { X, RotateCcw, Save, Upload, Music, Trash2, Folder, Moon, Sun, Volume2, Monitor } from 'lucide-react';
+import { X, RotateCcw, Save, Upload, Music, Trash2, Folder, Moon, Sun, Volume2, Monitor, FileText, Download, FolderOpen } from 'lucide-react';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -8,6 +8,8 @@ interface SettingsModalProps {
   settings: Settings;
   onSave: (newSettings: Settings) => void;
   onPickFile: () => Promise<string | null>;
+  onPickFolder: () => Promise<string | null>;
+  onImportMarkdown: () => Promise<void>;
 }
 
 const SettingsModal: React.FC<SettingsModalProps> = ({ 
@@ -15,7 +17,9 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
   onClose, 
   settings, 
   onSave,
-  onPickFile
+  onPickFile,
+  onPickFolder,
+  onImportMarkdown
 }) => {
   const [localSettings, setLocalSettings] = React.useState<Settings>(settings);
 
@@ -139,6 +143,83 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-6 space-y-8 custom-scrollbar">
             
+            {/* Markdown Export Settings */}
+            <section>
+                <div className="flex items-center gap-2 mb-4 border-b pb-2 text-gray-500">
+                    <FileText size={16} />
+                    <h3 className="text-sm font-semibold uppercase tracking-wider">任务存档 (Markdown)</h3>
+                </div>
+                <div className="space-y-4">
+                    {/* Enable Toggle */}
+                    <div className={`flex items-center justify-between p-3 rounded-lg border ${isDark ? 'bg-gray-700 border-gray-600' : 'bg-gray-50 border-gray-200'}`}>
+                        <div className="flex items-center gap-2">
+                            <FileText size={18} className={localSettings.enableMarkdownExport ? 'text-emerald-500' : 'text-gray-400'}/>
+                            <span className={`text-sm ${isDark ? 'text-gray-200' : 'text-gray-700'}`}>启用每日自动存档</span>
+                        </div>
+                        <label className="relative inline-flex items-center cursor-pointer">
+                            <input type="checkbox" checked={localSettings.enableMarkdownExport} onChange={(e) => handleChange('enableMarkdownExport', e.target.checked)} className="sr-only peer" />
+                            <div className="w-11 h-6 bg-gray-300 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-emerald-600"></div>
+                        </label>
+                    </div>
+                    
+                    {/* Folder Picker */}
+                    <div className={`flex items-center justify-between p-3 rounded-lg border ${isDark ? 'bg-gray-700 border-gray-600' : 'bg-gray-50 border-gray-200'}`}>
+                        <div className="flex items-center gap-3 overflow-hidden flex-1">
+                            <div className={`p-2 rounded-lg ${localSettings.markdownExportPath ? (isDark ? 'bg-emerald-900 text-emerald-300' : 'bg-emerald-100 text-emerald-600') : (isDark ? 'bg-gray-600 text-gray-400' : 'bg-gray-100 text-gray-400')}`}>
+                                <FolderOpen size={18} />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                                <p className={`text-sm font-medium ${isDark ? 'text-gray-200' : 'text-gray-700'}`}>存档文件夹</p>
+                                <p className="text-xs text-gray-500 truncate" title={localSettings.markdownExportPath || '未设置'}>
+                                    {localSettings.markdownExportPath || '点击右侧按钮选择文件夹...'}
+                                </p>
+                            </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <button 
+                                onClick={async () => {
+                                    const path = await onPickFolder();
+                                    if (path) {
+                                        setLocalSettings(prev => ({
+                                            ...prev,
+                                            markdownExportPath: path
+                                        }));
+                                    }
+                                }}
+                                className={`p-2 rounded-lg cursor-pointer transition ${isDark ? 'text-gray-400 hover:text-emerald-400 hover:bg-gray-600' : 'text-gray-500 hover:text-emerald-600 hover:bg-emerald-50'}`}
+                                title="选择文件夹"
+                            >
+                                <Folder size={18} />
+                            </button>
+                            {localSettings.markdownExportPath && (
+                                <button
+                                    onClick={() => {
+                                        setLocalSettings(prev => ({
+                                            ...prev,
+                                            markdownExportPath: null
+                                        }));
+                                    }}
+                                    className={`p-2 rounded-lg transition ${isDark ? 'text-gray-400 hover:text-red-400 hover:bg-gray-600' : 'text-gray-400 hover:text-red-500 hover:bg-red-50'}`}
+                                    title="清除设置"
+                                >
+                                    <Trash2 size={18} />
+                                </button>
+                            )}
+                        </div>
+                    </div>
+
+                    {/* Import Button */}
+                    <button
+                        onClick={onImportMarkdown}
+                        className={`w-full flex items-center justify-center gap-2 p-3 rounded-lg border transition ${isDark ? 'bg-gray-700 border-gray-600 text-gray-300 hover:bg-gray-600' : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100'}`}
+                    >
+                        <Download size={18} />
+                        <span className="text-sm font-medium">导入历史 Markdown 文件</span>
+                    </button>
+                    <p className="text-xs text-gray-400 italic">* 导入的 Markdown 文件将被解析并添加到统计数据中。</p>
+                </div>
+            </section>
+
             {/* Appearance */}
             <section>
                 <h3 className="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-4 border-b pb-2">外观 (Appearance)</h3>
