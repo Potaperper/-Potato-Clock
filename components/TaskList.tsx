@@ -141,6 +141,10 @@ interface TaskColumnProps {
   column: Column;
   tasks: Task[];
   darkMode: boolean;
+  taskCount: number; // Total tasks in this column
+  maxTaskCount: number; // Max tasks among all non-collapsed columns
+  allColumnsEmpty: boolean; // True if all columns have 0 tasks
+  allColumnsFull: boolean; // True if all columns have similar task counts
   onAddTask: (text: string, columnId: string) => void;
   onUpdateColumn: (id: string, title: string) => void;
   onDeleteColumn: (id: string) => void;
@@ -153,17 +157,20 @@ interface TaskColumnProps {
   onDropOnColumn: (e: React.DragEvent, columnId: string) => void;
   onDragColumnStart: (e: React.DragEvent, id: string) => void;
   onDropColumnReorder: (e: React.DragEvent, targetColId: string) => void;
+  // Collapse state lifted up
+  isCollapsed: boolean;
+  onToggleCollapse: () => void;
 }
 
 const TaskColumn: React.FC<TaskColumnProps> = ({
   column, tasks, darkMode, 
+  taskCount, maxTaskCount, allColumnsEmpty, allColumnsFull,
   onAddTask, onUpdateColumn, onDeleteColumn,
   onUpdateTask, onToggleTask, onDeleteTask,
   onDragStartTask, onDropOnTask, onDropOnColumn,
-  onDragColumnStart, onDropColumnReorder
+  onDragColumnStart, onDropColumnReorder,
+  isCollapsed, onToggleCollapse
 }) => {
-  const [isCollapsed, setIsCollapsed] = useState(false);
-  
   // Local state for renaming column
   const [isRenaming, setIsRenaming] = useState(false);
   const [localTitle, setLocalTitle] = useState(column.title);
@@ -201,11 +208,34 @@ const TaskColumn: React.FC<TaskColumnProps> = ({
       }
   };
 
+  // Calculate dynamic flex-grow
+  // When collapsed: 0 (just header)
+  // When all columns are empty or full: equal distribution (1)
+  // Otherwise: proportional to task count, with minimum of 0.5 for non-empty
+  const calculateFlexGrow = (): number => {
+    if (isCollapsed) return 0;
+    if (allColumnsEmpty || allColumnsFull) return 1;
+    if (taskCount === 0) return 0.3; // Minimum space for empty column
+    if (maxTaskCount === 0) return 1;
+    // Proportional: more tasks = more space
+    return Math.max(0.5, taskCount / maxTaskCount);
+  };
+
+  const flexGrow = calculateFlexGrow();
+  const columnStyle = isCollapsed 
+    ? {} // No inline style needed, CSS handles it
+    : { flexGrow };
+
   return (
     <div 
-      className={`flex-1 min-h-0 flex flex-col rounded-xl border shadow-sm transition-all ${
+      className={`rounded-xl border shadow-sm transition-all ${
+        isCollapsed 
+          ? 'flex-shrink-0' 
+          : 'min-h-0 flex flex-col'
+      } ${
         darkMode ? 'bg-gray-900 border-gray-700' : 'bg-white border-gray-200'
       }`}
+      style={columnStyle}
       onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; }}
       onDrop={(e) => {
         if (e.dataTransfer.getData('application/potato-task')) {
@@ -225,7 +255,7 @@ const TaskColumn: React.FC<TaskColumnProps> = ({
       >
          <div className="flex items-center gap-2 flex-1 overflow-hidden">
              <button 
-               onClick={() => setIsCollapsed(!isCollapsed)}
+               onClick={onToggleCollapse}
                className={`p-1 rounded transition ${darkMode ? 'text-gray-500 hover:bg-gray-700' : 'text-gray-400 hover:bg-gray-200'}`}
              >
                  {isCollapsed ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
@@ -360,6 +390,37 @@ const TaskList: React.FC<TaskListProps> = ({
   darkMode = false 
 }) => {
   
+  // --- Collapse State Management (lifted from TaskColumn) ---
+  const [collapsedColumns, setCollapsedColumns] = useState<Record<string, boolean>>({});
+
+  const toggleColumnCollapse = (columnId: string) => {
+    setCollapsedColumns(prev => ({
+      ...prev,
+      [columnId]: !prev[columnId]
+    }));
+  };
+
+  // --- Calculate task counts for dynamic sizing ---
+  const getTaskCountForColumn = (columnId: string) => {
+    return tasks.filter(t => t.columnId === columnId).length;
+  };
+
+  const taskCounts = columns.map(col => ({
+    id: col.id,
+    count: getTaskCountForColumn(col.id),
+    isCollapsed: collapsedColumns[col.id] || false
+  }));
+
+  // Only consider non-collapsed columns for max calculation
+  const nonCollapsedCounts = taskCounts.filter(tc => !tc.isCollapsed).map(tc => tc.count);
+  const maxTaskCount = nonCollapsedCounts.length > 0 ? Math.max(...nonCollapsedCounts) : 0;
+  const allColumnsEmpty = nonCollapsedCounts.every(c => c === 0);
+  
+  // Consider columns "full" if they have similar task counts (within 30% of max)
+  const threshold = maxTaskCount * 0.3;
+  const allColumnsFull = nonCollapsedCounts.length > 0 && 
+    nonCollapsedCounts.every(c => c >= maxTaskCount - threshold);
+
   // --- Drag & Drop Logic ---
   
   // 1. Task Dragging
@@ -436,27 +497,38 @@ const TaskList: React.FC<TaskListProps> = ({
     <div className="h-full flex flex-col relative p-4 gap-4 overflow-hidden">
       {/* Columns Container - Vertical Stack */}
       <div className="flex-1 flex flex-col overflow-y-auto custom-scrollbar gap-4 pb-2">
-         {columns.map(col => (
-             <TaskColumn 
-                key={col.id} 
-                column={col}
-                tasks={tasks}
-                darkMode={darkMode}
-                onAddTask={onAddTask}
-                onUpdateColumn={onUpdateColumn}
-                onDeleteColumn={onDeleteColumn}
-                onUpdateTask={onUpdateTask}
-                onToggleTask={onToggleTask}
-                onDeleteTask={onDeleteTask}
-                
-                onDragStartTask={handleDragStartTask}
-                onDropOnTask={handleDropOnTask}
-                onDropOnColumn={handleDropOnColumn}
-                
-                onDragColumnStart={handleDragStartColumn}
-                onDropColumnReorder={handleDropColumnReorder}
-             />
-         ))}
+         {columns.map(col => {
+             const taskCount = getTaskCountForColumn(col.id);
+             const isCollapsed = collapsedColumns[col.id] || false;
+             
+             return (
+               <TaskColumn 
+                  key={col.id} 
+                  column={col}
+                  tasks={tasks}
+                  darkMode={darkMode}
+                  taskCount={taskCount}
+                  maxTaskCount={maxTaskCount}
+                  allColumnsEmpty={allColumnsEmpty}
+                  allColumnsFull={allColumnsFull}
+                  isCollapsed={isCollapsed}
+                  onToggleCollapse={() => toggleColumnCollapse(col.id)}
+                  onAddTask={onAddTask}
+                  onUpdateColumn={onUpdateColumn}
+                  onDeleteColumn={onDeleteColumn}
+                  onUpdateTask={onUpdateTask}
+                  onToggleTask={onToggleTask}
+                  onDeleteTask={onDeleteTask}
+                  
+                  onDragStartTask={handleDragStartTask}
+                  onDropOnTask={handleDropOnTask}
+                  onDropOnColumn={handleDropOnColumn}
+                  
+                  onDragColumnStart={handleDragStartColumn}
+                  onDropColumnReorder={handleDropColumnReorder}
+               />
+             );
+         })}
       </div>
     </div>
   );
